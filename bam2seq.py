@@ -1,11 +1,14 @@
 """
-Input: Genome file (.bam), searched region
+tmp version 31.10.2024
+Input: Genome file(s) (.bam), searched region(s)
 Output: Reads within the given region with their variants
 """
 import subprocess
 import argparse
 import os
 from collections import Counter
+import time
+
 
 def extract_reads_from_sam(sam_file):
     reads = []
@@ -25,7 +28,7 @@ def trim_reads_and_find_variants(all_reads, start_range, end_range):
     variant_dict = {}
 
     for read in all_reads:
-        read_start = read[0]
+        read_start = read[0]  # Start pos of read
         read_end = read_start + len(read[1]) - 1
 
         # double check
@@ -63,38 +66,56 @@ def trim_reads_and_find_variants(all_reads, start_range, end_range):
 
 
 parser = argparse.ArgumentParser()
-parser.add_argument("-g", "--genome", type=str, required=True, help="genome file in bam format")
-parser.add_argument("-l", "--location", type=str, required=True, help="genome location to extract reads, e.g. 9:1000-1005 for positions 1000-1005 of chromosome 9")
+parser.add_argument("-g", "--genome", type=str, nargs="+", required=True, help="genome file in bam format")
+parser.add_argument("-l", "--location", type=str, nargs="+", required=True, help="genome location to extract reads, e.g. 9:1000-1005 for positions 1000-1005 of chromosome 9")
 parser.add_argument("-o", "--output", type=str, required=False, help="output file for the result")
 
 args = parser.parse_args()
-
-genome = args.genome
-genome_basename = os.path.splitext(os.path.basename(genome))[0]
-temp_sam_path = f"/tmp/{genome_basename}.sam"
-
-location = args.location
-grange = location.split(":")[1].split("-")
-start_pos, end_pos = int(grange[0]), int(grange[1])
-
+genomes = args.genome
+locations = args.location
 output = args.output
 
-# Use samtools to extract reads from the bam file
-command1 = f"(cd /mnt/proj/software && samtools view {genome} '{location}') > {temp_sam_path}"
-subprocess.run(command1, shell=True, check=True)
+results = [f"Genome\tLocation\tSequence\tVariants"]
 
-reads = extract_reads_from_sam(temp_sam_path)
-seq,variants = trim_reads_and_find_variants(reads, start_pos, end_pos)
+for genome in genomes:
+    genome_basename = os.path.splitext(os.path.basename(genome))[0]
+    genome_start_time = time.time() #runtime measurement
 
-if not output is None:
-    with open(output,"w") as o:
-        o.write(f"Genome positions:\t{location}\n")
-        o.write(f"Sequence in the given range:\t{seq}\n")
-        o.write(f"Variants and their frequencies:\t" + "; ".join(f"{pos}: {counts}" for pos, counts in variants.items()))
-else:
-    print(f"Sequence in the given range:\t{seq}")
-    print(f"Variants and their frequencies:\t" + "; ".join(f"{pos}: {counts}" for pos, counts in variants.items()))
+    for location in locations:
+        # Parse chromosome and range
+        chrom, pos_range = location.split(":")
+        start_pos, end_pos = map(int, pos_range.split("-"))
 
-# Clean up
-command2 = f"rm {temp_sam_path}"
-subprocess.run(command2, shell=True, check=True)
+        # Temporary SAM file path for each genome-location combination
+        temp_sam_path = f"/tmp/{genome_basename}_{chrom}_{start_pos}_{end_pos}.sam"
+
+        # Extract reads from the BAM file using samtools
+        command1 = f"(cd /mnt/proj/software && samtools view {genome} '{location}') > {temp_sam_path}"
+        subprocess.run(command1, shell=True, check=True)
+
+        # Process reads and find variants
+        reads = extract_reads_from_sam(temp_sam_path)
+        seq, variants = trim_reads_and_find_variants(reads, start_pos, end_pos)
+
+        genome_end_time = time.time()
+        runtime = genome_end_time - genome_start_time
+        print(f"Runtime for {genome_basename} at {location}: {runtime:.2f} seconds")
+
+        # Store results in structured format
+        if output:
+            results.append(f"{genome_basename}\t{location}\t{seq}\t" +
+                           "; ".join(f"{pos}:{counts}" for pos, counts in variants.items()))
+        else:
+            print(f"Genome file: {genome}\nLocation: {location}")
+            print(f"Sequence: {seq}")
+            print("Variants and frequencies:")
+            for pos, counts in variants.items():
+                print(f"Position {pos}: {counts}")
+
+        # Clean up
+        os.remove(temp_sam_path)
+
+# Write to output file if specified
+if output:
+    with open(output, "w") as o:
+        o.write("\n".join(results))
