@@ -1,7 +1,7 @@
 """
-tmp version 08.11.2024
-Input: Genome file(s) (.bam), searched region(s)
-Output: Reads within the given region with their variants
+version 15.11.2024
+Input: A file containing paths to genomes, A file containing paths to searched region(s), Path to reference genome
+Output: Reads within the given region with their variants in sequencing and in comparison with the reference genome
 """
 import subprocess
 import argparse
@@ -59,7 +59,8 @@ def trim_reads_and_find_variants(all_reads, location, reference):
     seq = ""
     variants = {}
     SNPs = {}
-    counter = 0
+    possible_SNPs={}
+    counter = 0  # for iterating the seq from ref genome
 
     for pos in sorted(variant_dict.keys()):
         bases = variant_dict[pos]
@@ -73,40 +74,51 @@ def trim_reads_and_find_variants(all_reads, location, reference):
             seq += "(" + "/".join(ordered_bases) + ")"
             variants[pos] = dict(sorted_bases)
 
-            # Add SNPs
-            all_bases = "/".join(unique_bases)
-            SNPs[pos] = f"{all_bases}//{reference[counter]}"
+            # Check if it can be a SNP or Haploid difference
+            most_frequent_base = ordered_bases[0]
+            ratio = (frequency[most_frequent_base] / sum(frequency.values()))
+
+            if not ordered_bases[0] == reference[counter] or ratio < 0.7:  # compare the most frequent base read at position with the ref
+                all_bases = "/".join(ordered_bases)
+                possible_SNPs[pos] = f"{reference[counter]}//{all_bases}"
+
         else:  # Only one base at that position
             base = bases[0]
             seq += base
 
-            if not base == reference[counter]:
-                SNPs[pos] = f"{reference[counter]}//{base}"
+            if not base == reference[counter]:  # SNP found
+                SNPs[pos] = f"{reference[counter]}/{base}"
 
         counter+=1
 
-    return seq, variants, SNPs
+    return seq, variants, SNPs, possible_SNPs
 
 def extract_ref_genome(fa, locations):
     """
     :param fa: path to fasta file containing refernce genome
-    :param locations:
-    :return:
+    :param locations: a file containing loctions to extract
+    :return: a dictionary, where key=location, value=sequence at the location
     """
     cmd = f"samtools faidx {fa} -r {locations}"
-    result = subprocess.run(cmd, shell=True, check=True, stdout=subprocess.PIPE, text=True)
+    result = subprocess.run(cmd, shell=True, check=True, stdout=subprocess.PIPE)
+    output = result.stdout.decode("utf-8")  # Decode the `stdout` attribute
 
     seqs= {}
-    seq =""
-    location = ""
+    seq = ""
+    location = None
 
-    for line in result.stdout.splitlines():
-        if line.startswith(">"):  # Skip header lines
-            seqs[location] = seq
-            location = line[1:]
-            seq =""
+    for line in output.splitlines():
+        if line.startswith(">"):  # Header line
+            if location:
+                seqs[location] = seq
+            location = line[1:]  # Extract location name (without '>')
+            seq = ""
         else:
             seq += line.strip()
+
+    # Add the last sequence to the dictionary
+    if location:
+        seqs[location] = seq
 
     return seqs
 
@@ -120,32 +132,39 @@ def parse_genome(path):
             genomes.append(line.strip())
     return genomes
 
+def calc_false_sequencing_rate(variants:dict, possible_SNPs:dict, ref):
+    if len(variants) > 0:
+        return round((len(variants) - len(possible_SNPs)) / len(ref), 5)
+    else:
+        return 0.0
+
 parser = argparse.ArgumentParser()
 parser.add_argument("-g", "--genome", type=str, required=True, help="file containing path to genome(s) in bam format")
 parser.add_argument("-r", "--reference", type=str, required=True, help="reference genome in fasta format")
-parser.add_argument("-l", "--location", type=str, nargs="+", required=True, help="genome location to extract reads")
+parser.add_argument("-l", "--location", type=str, required=True, help="genome location to extract reads")
 parser.add_argument("-o", "--output", type=str, required=False, help="output file for the result")
 
 args = parser.parse_args()
 genome_path = args.genome
 ref_path = args.reference
 output = args.output
+location_path = args.location
 
 # Parse the input path to a list of bam files (index 0) and vcf files(index1)
 genomes= parse_genome(genome_path)
 
 locations=[]
 
-if os.path.isfile(args.location[0]):  # Input is a file
-    with open(args.location[0], 'r') as f:
+if os.path.isfile(location_path):  # Input is a file
+    with open(location_path, 'r') as f:
         for line in f:
             locations.append(line.strip())
-else:  # Input is a list of ranges
-    locations = args.location
+else:
+    raise Exception("Location file not found or not correct")
 
-ref_genome = extract_ref_genome(ref_path, locations)
+ref_genome = extract_ref_genome(ref_path, location_path)
 
-results = [f"#Genome\tChromosome\tStart\tEnd\tSequence\tReference\tSNP\tSNP_Freq\tVariance\tVariance_Freq"]
+results = [f"#Genome\tChromosome\tStart\tEnd\tSequence\tReference\tSNP\tSNP_Freq\tRead_Variance\tVariance_Freq\tPossible_SNP\tApprox_sequencing_rate"]
 
 for genome in genomes:
 
@@ -166,23 +185,22 @@ for genome in genomes:
         ref = ref_genome.get(location)
 
         # Process reads and find variants for the current location
-        seq, variants, SNPs = trim_reads_and_find_variants(all_reads, location, ref)
+        seq, variants, SNPs, possible_SNPs = trim_reads_and_find_variants(all_reads, location, ref)
 
         chrom, pos_range = location.split(":")
         start_pos, end_pos = map(int, pos_range.split("-"))
 
-        if output:
-            results.append(f"{genome_basename}\t{chrom}\t{start_pos}\t{end_pos}\t{seq}\t{ref}"
-                           f"{';'.join(f'{pos}:{snp}' for pos, snp in SNPs.items())}\t"
-                           f"{len(SNPs)}\t"
-                           f"{';'.join(f'{pos}:{counts}' for pos, counts in variants.items())}\t"
-                           f"{len(variants)}\t")
-        else:
-            print(f"Genome: {genome}\nLocation: {location}")
-            print(f"Sequence: {seq}")
-            print("Differences and frequencies:")
-            for pos, counts in variants.items():
-                print(f"Position {pos}: {counts}")
+        false_seq_rate = calc_false_sequencing_rate(variants, possible_SNPs, ref)
+
+        results.append(
+            f"{genome_basename}\t{chrom}\t{start_pos}\t{end_pos}\t{seq}\t{ref}\t"
+            f"{';'.join(f'{pos}:{snp}' for pos, snp in SNPs.items()) if SNPs else '-'}\t"
+            f"{len(SNPs) if SNPs else 0}\t"
+            f"{';'.join(f'{pos}:{counts}' for pos, counts in variants.items()) if variants else '-'}\t"
+            f"{len(variants) if variants else 0}\t"
+            f"{';'.join(f'{pos}:{snp}' for pos, snp in possible_SNPs.items()) if possible_SNPs else '-'}\t"
+            f"{false_seq_rate}\t"
+        )
 
     genome_end_time = time.perf_counter()
     runtime = genome_end_time - genome_start_time
@@ -195,4 +213,7 @@ for genome in genomes:
 if output:
     with open(output, "w") as o:
         o.write("\n".join(results))
+else:
+    print("\n".join(results))
+
 
