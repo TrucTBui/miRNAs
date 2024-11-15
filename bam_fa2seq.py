@@ -25,7 +25,7 @@ def extract_reads_from_sam(sam_file):
     return reads
 
 
-def trim_reads_and_find_variants(all_reads, location):
+def trim_reads_and_find_variants(all_reads, location, reference):
     chromosome, pos_range = location.split(":")
     start_range, end_range = map(int, pos_range.split("-"))
 
@@ -58,24 +58,41 @@ def trim_reads_and_find_variants(all_reads, location):
 
     seq = ""
     variants = {}
+    SNPs = {}
+    counter = 0
+
     for pos in sorted(variant_dict.keys()):
         bases = variant_dict[pos]
         frequency = Counter(bases)  # Count how frequent each variant is
         unique_bases = set(bases)
+
+        # Find variances in reads
         if len(unique_bases) > 1:  # More than one unique nucleotide means a variant
             sorted_bases = sorted(frequency.items(), key=lambda item: item[1], reverse=True)
             ordered_bases = [base for base, count in sorted_bases]
             seq += "(" + "/".join(ordered_bases) + ")"
             variants[pos] = dict(sorted_bases)
-        else:
-            seq += bases[0]
 
-    #TODO: compare
+            # Add SNPs
+            all_bases = "/".join(unique_bases)
+            SNPs[pos] = f"{all_bases}//{reference[counter]}"
+        else:  # Only one base at that position
+            base = bases[0]
+            seq += base
 
+            if not base == reference[counter]:
+                SNPs[pos] = f"{reference[counter]}//{base}"
 
-    return seq, variants
+        counter+=1
+
+    return seq, variants, SNPs
 
 def extract_ref_genome(fa, locations):
+    """
+    :param fa: path to fasta file containing refernce genome
+    :param locations:
+    :return:
+    """
     cmd = f"samtools faidx {fa} -r {locations}"
     result = subprocess.run(cmd, shell=True, check=True, stdout=subprocess.PIPE, text=True)
 
@@ -126,7 +143,7 @@ if os.path.isfile(args.location[0]):  # Input is a file
 else:  # Input is a list of ranges
     locations = args.location
 
-ref_genome = extract_ref_genome(ref_path)
+ref_genome = extract_ref_genome(ref_path, locations)
 
 results = [f"#Genome\tChromosome\tStart\tEnd\tSequence\tReference\tSNP\tSNP_Freq\tVariance\tVariance_Freq"]
 
@@ -149,15 +166,15 @@ for genome in genomes:
         ref = ref_genome.get(location)
 
         # Process reads and find variants for the current location
-        seq, variants = trim_reads_and_find_variants(all_reads, location)
+        seq, variants, SNPs = trim_reads_and_find_variants(all_reads, location, ref)
 
         chrom, pos_range = location.split(":")
         start_pos, end_pos = map(int, pos_range.split("-"))
 
         if output:
             results.append(f"{genome_basename}\t{chrom}\t{start_pos}\t{end_pos}\t{seq}\t{ref}"
-                           #f"{';'.join(f'{pos}:{snp}' for pos, snp in snps.items())}\t"
-                           #f"{len(snps)}\t"
+                           f"{';'.join(f'{pos}:{snp}' for pos, snp in SNPs.items())}\t"
+                           f"{len(SNPs)}\t"
                            f"{';'.join(f'{pos}:{counts}' for pos, counts in variants.items())}\t"
                            f"{len(variants)}\t")
         else:

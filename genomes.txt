@@ -1,0 +1,3 @@
+#bam
+/mnt/raidproj/proj/projekte/personalizedmed/PPG/RZ1/0381_UA010903/56001808050381.bam
+/mnt/raidproj/proj/projekte/personalizedmed/PPG/RZ2/22-UA010903/TSAB2165.bam
