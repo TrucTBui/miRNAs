@@ -1,26 +1,44 @@
 # miRNAs
 
-## bam2seq.py
+## bam_fa2seq.py
 
-This script identifies variants within specified regions of a provided genome file (BAM format).
+This script analyzes sequencing data from multiple genomes (provided as BAM files) to identify variants within specified regions of interest. It compares these variants to a reference genome provided in FASTA format.
 
-Features
-- Extracts reads from the BAM file for a given location.
-- Trims reads to match the specified region.
-- Identifies variants within the trimmed reads and their frequencies.
-- Outputs results to the console or a user-defined file.
-- Measures and reports runtime for each processed genome file.
+**Features**:
 
-Usage: \
-python3 bam2seq.py -g <genome_file1> <genome_file2> ... -l <location1> <location2> ... [-o <output_file>]
+- Extracts reads from BAM files for specific genomic regions.
+- Identifies variants (SNPs) within the reads compared to the reference genome.
+- Calculates an approximate false sequencing error rate.
+- Generates two output files (configurable):
+  - summary.tsv: Summarizes variants and SNPs found for each region across all genomes.
+  - results.tsv: Detailed information about each variant call, including reference and alternative alleles for each genome analyzed.
 
-Arguments: \
--g: Required. Path to one or more genome files in BAM format. Provide separate paths for multiple files. \
--l: Required. Location(s) within the genome to analyze. Use format <chromosome>:<start_position>-<end_position> for each location. Provide separate locations with spaces. \
--o (Optional): Path to an output file to store the results. If not provided, results will be printed to the console. 
+**Requirements**:
+- Python 3+
+- pandas library
+- samtools 
 
-Example:\
-python3 bam2seq.py -g human_genome.bam -l chr1:1000-1005 chr2:2000-2010 -o variants.txt \
-This command will analyze regions chr1:1000-1005 and chr2:2000-2010 in the human_genome.bam file and write the results (sequence and variant information) to the variants.txt file. 
+**Usage**:
 
-NOTE: Please ensure that the chromosome names in your location specifications match the format used in your BAM files. Some BAM files use "chr1", "chr2", etc., while others use "1", "2", etc. 
+python3 bam_fa2seq.py -g <genomes.txt> -r <reference.fa> -l <location.txt> -o <output_dir> 
+Arguments:
+
+-g: Path to a text file containing paths to BAM files (one per line).
+-r: Path to the reference genome FASTA file.
+-l: Path to a text file containing genomic regions to analyze (one region per line, format: chr:start-end).
+-o (Optional): Path to the output directory. Defaults to the current working directory.
+
+Requirements for input Files:
+- genomes.txt: A text file containing paths to each BAM file, one per line.
+- location.txt: A text file containing genomic regions to analyze, one per line. Each line should be formatted as chromosome:start-end (e.g., chr1:1000-2000).
+
+Output Files:
+- summary.tsv: A tab-delimited file summarizing variants and SNPs found for each region across all genomes.
+- results.tsv: A tab-delimited file containing detailed information about each variant call, including reference and alternative alleles for each genome analyzed. (Written to a temporary file first, then transformed and written to the final output file.)
+
+Notes:
+- Please ensure that the chromosome names in your location specifications match the format used in your BAM files. Some BAM files use "chr1", "chr2", etc., while others use "1", "2", etc. 
+- This script uses temporary files during execution, which are automatically cleaned up.
+- The script calculates an approximate false sequencing error rate based on the identified variants.
+- This script provides a basic framework for variant calling and analysis. You can modify it to suit your specific needs, such as filtering variants based on quality scores or incorporating additional analysis steps.
+- This script relies on samtools, which is installed and accessible from the LMU Bioinformatics chair's internal environment. You may need to adjust the samtools command if used in a different setup.

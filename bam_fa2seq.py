@@ -152,7 +152,7 @@ parser = argparse.ArgumentParser()
 parser.add_argument("-g", "--genome", type=str, required=True, help="file containing path to genome(s) in bam format")
 parser.add_argument("-r", "--reference", type=str, required=True, help="reference genome in fasta format")
 parser.add_argument("-l", "--location", type=str, required=True, help="genome location to extract reads")
-parser.add_argument("-o", "--output", type=str, required=False, help="output folder for the result")
+parser.add_argument("-o", "--output", type=str, required=False, help="output folder for the result", default="./")
 
 args = parser.parse_args()
 genome_path = args.genome
