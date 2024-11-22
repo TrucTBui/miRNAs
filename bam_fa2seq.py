@@ -1,5 +1,5 @@
 """
-version 15.11.2024
+version 22.11.2024
 Input: A file containing paths to genomes, A file containing paths to searched region(s), Path to reference genome
 Output: Reads within the given region with their variants in sequencing and in comparison with the reference genome
 """
@@ -8,6 +8,7 @@ import argparse
 import os
 from collections import Counter
 import time
+import pandas as pd
 
 
 def extract_reads_from_sam(sam_file):
@@ -24,8 +25,7 @@ def extract_reads_from_sam(sam_file):
 
     return reads
 
-
-def trim_reads_and_find_variants(all_reads, location, reference):
+def reads_processing(all_reads, location):
     chromosome, pos_range = location.split(":")
     start_range, end_range = map(int, pos_range.split("-"))
 
@@ -51,21 +51,30 @@ def trim_reads_and_find_variants(all_reads, location, reference):
 
         # find variants
         for i, base in enumerate(trimmed_sequence):
+            # pos = f"{chromosome}:{actual_start + i}"
             pos = actual_start + i
             if pos not in variant_dict:
                 variant_dict[pos] = []
             variant_dict[pos].append(base)
 
+    return variant_dict
+
+def find_variants_per_pos(variant_dict: dict(), reference):
     seq = ""
-    variants = {}
+    variants = {}  # Contains base of reference and alternative
+    all_results = {}
     SNPs = {}
-    possible_SNPs={}
+    possible_SNPs = {}
     counter = 0  # for iterating the seq from ref genome
 
     for pos in sorted(variant_dict.keys()):
+        ref = reference[counter]
+        all_results[pos] = [ref]
+
         bases = variant_dict[pos]
         frequency = Counter(bases)  # Count how frequent each variant is
         unique_bases = set(bases)
+        all_results[pos].append("/".join(unique_bases))
 
         # Find variances in reads
         if len(unique_bases) > 1:  # More than one unique nucleotide means a variant
@@ -75,27 +84,28 @@ def trim_reads_and_find_variants(all_reads, location, reference):
             variants[pos] = dict(sorted_bases)
 
             # Check if it can be a SNP or Haploid difference
-            most_frequent_base = ordered_bases[0]
+            most_frequent_base = ordered_bases[0]  # Extract the most significant base
             ratio = (frequency[most_frequent_base] / sum(frequency.values()))
 
-            if not ordered_bases[0] == reference[counter] or ratio < 0.7:  # compare the most frequent base read at position with the ref
+            # compare the most frequent base read at position with the ref
+            if not ordered_bases[0] == ref or ratio < 0.7:
                 all_bases = "/".join(ordered_bases)
-                possible_SNPs[pos] = f"{reference[counter]}//{all_bases}"
+                possible_SNPs[pos] = f"{ref}//{all_bases}"
 
         else:  # Only one base at that position
             base = bases[0]
             seq += base
 
-            if not base == reference[counter]:  # SNP found
-                SNPs[pos] = f"{reference[counter]}/{base}"
+            if not base == ref:  # SNP found
+                SNPs[pos] = f"{ref}/{base}"
 
-        counter+=1
+        counter += 1
 
-    return seq, variants, SNPs, possible_SNPs
+    return all_results, seq, variants, SNPs, possible_SNPs
 
 def extract_ref_genome(fa, locations):
     """
-    :param fa: path to fasta file containing refernce genome
+    :param fa: path to fasta file containing reference genome
     :param locations: a file containing loctions to extract
     :return: a dictionary, where key=location, value=sequence at the location
     """
@@ -142,7 +152,7 @@ parser = argparse.ArgumentParser()
 parser.add_argument("-g", "--genome", type=str, required=True, help="file containing path to genome(s) in bam format")
 parser.add_argument("-r", "--reference", type=str, required=True, help="reference genome in fasta format")
 parser.add_argument("-l", "--location", type=str, required=True, help="genome location to extract reads")
-parser.add_argument("-o", "--output", type=str, required=False, help="output file for the result")
+parser.add_argument("-o", "--output", type=str, required=False, help="output folder for the result")
 
 args = parser.parse_args()
 genome_path = args.genome
@@ -158,13 +168,16 @@ locations=[]
 if os.path.isfile(location_path):  # Input is a file
     with open(location_path, 'r') as f:
         for line in f:
-            locations.append(line.strip())
+            if not line.startswith("#"):
+                locations.append(line.strip())
 else:
     raise Exception("Location file not found or not correct")
 
 ref_genome = extract_ref_genome(ref_path, location_path)
 
-results = [f"#Genome\tChromosome\tStart\tEnd\tSequence\tReference\tSNP\tSNP_Freq\tRead_Variance\tVariance_Freq\tPossible_SNP\tApprox_sequencing_rate"]
+results = [f"Genome\tChromosome\tPosition\tReference\tAlternative"]
+
+summary = [f"Genome\tChromosome\tStart\tEnd\tSequence\tReference\tSNP\tSNP_Freq\tRead_Variance\tVariance_Freq\tPossible_SNP\tApprox_sequencing_rate"]
 
 for genome in genomes:
 
@@ -185,14 +198,21 @@ for genome in genomes:
         ref = ref_genome.get(location)
 
         # Process reads and find variants for the current location
-        seq, variants, SNPs, possible_SNPs = trim_reads_and_find_variants(all_reads, location, ref)
+        variant_dict = reads_processing(all_reads, location)
+
+        all_results, seq, variants, SNPs, possible_SNPs = find_variants_per_pos(variant_dict, ref)
 
         chrom, pos_range = location.split(":")
         start_pos, end_pos = map(int, pos_range.split("-"))
 
         false_seq_rate = calc_false_sequencing_rate(variants, possible_SNPs, ref)
 
-        results.append(
+        for pos in sorted(all_results.keys()):
+            r = all_results[pos][0]
+            a = all_results[pos][1]
+            results.append(f"{genome_basename}\t{chrom}\t{pos}\t{r}\t{a}\t")
+
+        summary.append(
             f"{genome_basename}\t{chrom}\t{start_pos}\t{end_pos}\t{seq}\t{ref}\t"
             f"{';'.join(f'{pos}:{snp}' for pos, snp in SNPs.items()) if SNPs else '-'}\t"
             f"{len(SNPs) if SNPs else 0}\t"
@@ -209,11 +229,34 @@ for genome in genomes:
     # Clean up
     os.remove(f"/tmp/{genome_basename}.sam")
 
-# Write to output file if specified
+
 if output:
-    with open(output, "w") as o:
+    output_dir = output
+    os.makedirs(output_dir, exist_ok=True)  # Create the directory if it doesn't exist
+    with open(f"{output_dir}/summary.tsv", "w") as o:
+        o.write("\n".join(summary))
+
+    with open(f"{output_dir}/results_tmp.tsv", "w") as o:
         o.write("\n".join(results))
-else:
-    print("\n".join(results))
+
+    # Read the TSV file
+    df = pd.read_csv(f"{output_dir}/results_tmp.tsv", sep="\t", header=0, index_col=False)
+
+    # Transform the df
+    pivot_df = df.pivot_table(
+        values="Alternative", index=["Chromosome", "Position", "Reference"],
+        columns="Genome", aggfunc='first'
+    ).reset_index()
+
+    # Rename columns
+    pivot_df.columns = ["Chromosome", "Position", "Reference"] + [
+        f"Alternative_{col}" for col in pivot_df.columns[3:]
+    ]
+
+    pivot_df.to_csv(f"{output_dir}/results.tsv", sep="\t", index=False)
+    os.remove(f"{output_dir}/results_tmp.tsv")
+
+
+
 
 
