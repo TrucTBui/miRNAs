@@ -23,10 +23,13 @@ This script analyzes sequencing data from multiple genomes (provided as BAM file
 python3 bam_fa2seq.py -g <genomes.txt> -r <reference.fa> -l <location.txt> -o <output_dir> 
 Arguments:
 
--g: Path to a text file containing paths to BAM files (one per line).
--r: Path to the reference genome FASTA file.
--l: Path to a text file containing genomic regions to analyze (one region per line, format: chr:start-end).
--o (Optional): Path to the output directory. Defaults to the current working directory.
+- -g (--genome): Path to a text file containing paths to BAM files (one per line).
+- -r (--reference): Path to the reference genome FASTA file.
+- -l (--location): Path to a text file containing genomic regions to analyze (one region per line, format: chr:start-end).
+- -o (--output) (Optional): Path to the output directory. Defaults to the current working directory.
+
+Example:
+python3 bam_fa2seq.py --genome genomes.txt --reference /mnt/raidinput/input/own/ReferenceGenomes/human_g1k_v37.fasta.gz --location location.txt      
 
 Requirements for input Files:
 - genomes.txt: A text file containing paths to each BAM file, one per line.
