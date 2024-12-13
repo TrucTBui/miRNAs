@@ -1,5 +1,5 @@
 """
-version 22.11.2024
+version 06.12.2024
 Input: A file containing paths to genomes, A file containing paths to searched region(s), Path to reference genome
 Output: Reads within the given region with their variants in sequencing and in comparison with the reference genome
 """
@@ -9,7 +9,6 @@ import os
 from collections import Counter
 import time
 import pandas as pd
-
 
 def extract_reads_from_sam(sam_file):
     reads = []
@@ -61,47 +60,58 @@ def reads_processing(all_reads, location):
 
 def find_variants_per_pos(variant_dict: dict(), reference):
     seq = ""
-    variants = {}  # Contains base of reference and alternative
+    variants = {}
     all_results = {}
+    processed_results = {}
     SNPs = {}
-    possible_SNPs = {}
+    haploids = {}
     counter = 0  # for iterating the seq from ref genome
 
     for pos in sorted(variant_dict.keys()):
         ref = reference[counter]
-        all_results[pos] = [ref]
+        all_results[pos] = [ref]  # 0.index contains ref, 1.index contains alternative
 
         bases = variant_dict[pos]
         frequency = Counter(bases)  # Count how frequent each variant is
         unique_bases = set(bases)
-        all_results[pos].append("/".join(unique_bases))
+        all_results[pos].append("/".join(unique_bases)) # 0.index contains ref, 1.index contains alternative
 
         # Find variances in reads
         if len(unique_bases) > 1:  # More than one unique nucleotide means a variant
             sorted_bases = sorted(frequency.items(), key=lambda item: item[1], reverse=True)
             ordered_bases = [base for base, count in sorted_bases]
-            seq += "(" + "/".join(ordered_bases) + ")"
+
             variants[pos] = dict(sorted_bases)
 
-            # Check if it can be a SNP or Haploid difference
             most_frequent_base = ordered_bases[0]  # Extract the most significant base
             ratio = (frequency[most_frequent_base] / sum(frequency.values()))
 
-            # compare the most frequent base read at position with the ref
-            if not ordered_bases[0] == ref or ratio < 0.7:
-                all_bases = "/".join(ordered_bases)
-                possible_SNPs[pos] = f"{ref}//{all_bases}"
+            # Process the reads results: The most frequent base is supposed to be the correct one
+            if ratio >= 0.75 or (len(unique_bases) > 2 and ratio >= 0.5):  # 3 or 4 bases detected when reading
+                processed_results[pos] = most_frequent_base
+                seq += most_frequent_base
+
+                # compare the most frequent base read at position with the ref
+                if not most_frequent_base == ref:  # SNP found
+                    SNPs[pos] = f"{ref}/{most_frequent_base}"
+            else:
+                processed_results[pos] = "/".join(unique_bases)
+                seq += "(" + "/".join(ordered_bases) + ")"
+
+                haploids[pos] = "/".join(ordered_bases)
+
 
         else:  # Only one base at that position
             base = bases[0]
             seq += base
+            processed_results[pos] = base
 
             if not base == ref:  # SNP found
                 SNPs[pos] = f"{ref}/{base}"
 
         counter += 1
 
-    return all_results, seq, variants, SNPs, possible_SNPs
+    return all_results, processed_results, seq, variants, SNPs, haploids
 
 def extract_ref_genome(fa, locations):
     """
@@ -142,11 +152,146 @@ def parse_genome(path):
             genomes.append(line.strip())
     return genomes
 
-def calc_false_sequencing_rate(variants:dict, possible_SNPs:dict, ref):
+def transform_location_input(path):
+    locations= []
+    with open(path, 'r') as f:
+        for line in f:
+            if not line.startswith("#"):
+                fields = line.split()
+                chromosome = fields[3]
+                if chromosome.startswith("chr"):
+                    chromosome = chromosome[3:]
+                start = fields[5]
+                end = fields[6]
+                locations.append(f"{chromosome}:{start}-{end}")
+    with open(f"{os.path.dirname(path)}/locations_tranformed.txt", 'w') as w:
+         for location in locations:
+             w.write(f"{location}\n")
+    return locations
+
+def calc_false_sequencing_rate(variants:dict,processed_results, ref:str):
     if len(variants) > 0:
-        return round((len(variants) - len(possible_SNPs)) / len(ref), 5)
+        error_num = 0
+        for pos in variants.keys():
+            if "/" not in processed_results[pos]:
+                error_num+=1
+        return round(error_num/len(ref), 5)
     else:
         return 0.0
+
+def print_output(output_path):
+    os.makedirs(output_path, exist_ok=True)  # Create the directory if it doesn't exist
+    with open(f"{output_path}/summary.tsv", "w") as o:
+        o.write("\n".join(summary))
+
+    with open(f"{output_path}/results_tmp.tsv", "w") as o:
+        o.write("\n".join(results))
+
+    # Read the TSV file
+    df = pd.read_csv(f"{output_path}/results_tmp.tsv", sep="\t", header=0, index_col=False)
+
+    # Transform the df
+    pivot_df = df.pivot_table(
+        values=["Alternative", "Variants_Freq", "Processed_Alt"], index=["Chromosome", "Position", "Reference"],
+        columns="Genome", aggfunc='first'
+    ).reset_index()
+
+    pivot_df.columns = ['Chromosome', 'Position', 'Reference'] + [
+        f"{col[0]}_{col[1]}" for col in pivot_df.columns[3:]
+    ]
+
+
+    # Rearrange the columns
+    columns = ['Chromosome', 'Position', 'Reference']
+    other_columns = [col for col in pivot_df.columns if col not in columns]
+    genome_names = set(a.split("_")[1] for a in other_columns)
+    for name in genome_names:
+        columns.extend([col for col in pivot_df.columns if col.endswith(name)])
+    pivot_df = pivot_df[columns]
+
+    pivot_df['Conclusion'] = 'Normal'
+
+    problematic_pos = []
+    # raw_base_cols = [col for col in columns if col.startswith("Alternative")]
+    final_base_cols = [col for col in columns if col.startswith("Processed_Alt")]
+
+    for index, row in pivot_df.iterrows():
+        ref = row.Reference
+        alts = []
+        """
+        for col in raw_base_cols:
+            if row[col].count('/') == 3:  # Problematic: All 4 bases were read at the position
+                pivot_df.loc[index, 'Conclusion'] = 'Problem'
+                problematic_pos.append(f"{row.Chromosome}:{row.Position}")
+                break
+        """
+        for col in final_base_cols:
+            alt = row[col]
+            alts.append(alt)
+        if len(set(alts)) > 1 or any('/' in alt for alt in alts):  # Conflicts in read
+            if all('/' in alt for alt in alts) or all('/' not in alt for alt in alts):
+                pivot_df.loc[index, 'Conclusion'] = 'Haploid'
+            else:  # Problematic: Haploid in one genome and no-halpoid in the other one
+                pivot_df.loc[index, 'Conclusion'] = 'Problem'
+                problematic_pos.append(f"{row.Chromosome}:{row.Position}")
+        elif ref != alts[0]:  # Base is clear and different from the ref
+            pivot_df.loc[index, 'Conclusion'] = 'SNP'
+
+
+    pivot_df.to_csv(f"{output_path}/results.tsv", sep="\t", index=False)
+
+    with open(f"{output_path}/problems.csv", "w") as o:
+        if len(problematic_pos) > 0:
+            grouped_regions = group_problematic_positions(problematic_pos)
+            o.write("\n".join(grouped_regions))
+        else:
+            o.write("No problematic positions detected.")
+
+    os.remove(f"{output_path}/results_tmp.tsv")
+
+
+def group_problematic_positions(problematic_pos, distance_threshold=5):
+    grouped_regions = []
+    current_region = None
+
+    for pos in sorted(problematic_pos):
+        chrom, position = pos.split(":")
+        position = int(position)
+
+        if current_region is None:
+            current_region = [chrom, position, position]  # Start a new region
+        elif (chrom == current_region[0]) and (position <= current_region[2] + distance_threshold):
+            # Extend the current region if within the threshold
+            current_region[2] = position
+        else:
+            # Save the completed region and start a new one
+            grouped_regions.append([current_region[0], current_region[1], current_region[2]])
+            current_region = [chrom, position, position]
+
+    # Add the last region
+    if current_region is not None:
+        grouped_regions.append([current_region[0], current_region[1], current_region[2]])
+
+    # Merging
+    def merge_regions(regions):
+        merged = []
+        # regions = sorted(regions, key=lambda x: x[1])  # Sort by start position
+
+        while regions:
+            current = regions.pop(0)
+            # Try to merge with the next region if close enough
+            # Check if the end postition of the current region is close to start position of the next region
+            while regions and (regions[0][0] == current[0]) and (regions[0][1] <= current[2] + distance_threshold):
+                current[2] = max(current[2], regions[0][2])  # Extend the current region
+                regions.pop(0)  # Remove the merged region
+
+            merged.append(f"{current[0]}:{current[1]}-{current[2]}")
+
+        return merged
+
+    # Perform the merge
+    return merge_regions(grouped_regions)
+
 
 parser = argparse.ArgumentParser()
 parser.add_argument("-g", "--genome", type=str, required=True, help="file containing path to genome(s) in bam format")
@@ -163,8 +308,8 @@ location_path = args.location
 # Parse the input path to a list of bam files (index 0) and vcf files(index1)
 genomes= parse_genome(genome_path)
 
-locations=[]
-
+"""
+# The input file is already a csv file, each line containing the position
 if os.path.isfile(location_path):  # Input is a file
     with open(location_path, 'r') as f:
         for line in f:
@@ -174,10 +319,20 @@ else:
     raise Exception("Location file not found or not correct")
 
 ref_genome = extract_ref_genome(ref_path, location_path)
+"""
 
-results = [f"Genome\tChromosome\tPosition\tReference\tAlternative"]
+if os.path.isfile(location_path):  # Input is the annotation file from ISAR
+    locations = transform_location_input(location_path)
+    transformed_path = f"{os.path.dirname(location_path)}/locations_tranformed.txt"
+    ref_genome = extract_ref_genome(ref_path, transformed_path)
 
-summary = [f"Genome\tChromosome\tStart\tEnd\tSequence\tReference\tSNP\tSNP_Freq\tRead_Variance\tVariance_Freq\tPossible_SNP\tApprox_sequencing_rate"]
+else:
+    raise Exception("Location file not found or not correct")
+
+
+results = [f"Genome\tChromosome\tPosition\tReference\tAlternative\tVariants_Freq\tProcessed_Alt"]
+
+summary = [f"Genome\tChromosome\tStart\tEnd\tProcessed_Sequence\tReference\tSNP\tSNP_Freq\tSequencing_Variance_Freq\tHaploid\tApprox_sequencing_rate"]
 
 for genome in genomes:
 
@@ -200,25 +355,29 @@ for genome in genomes:
         # Process reads and find variants for the current location
         variant_dict = reads_processing(all_reads, location)
 
-        all_results, seq, variants, SNPs, possible_SNPs = find_variants_per_pos(variant_dict, ref)
+        all_results, processed_results, seq, variants, SNPs, haploids = find_variants_per_pos(variant_dict, ref)
 
         chrom, pos_range = location.split(":")
         start_pos, end_pos = map(int, pos_range.split("-"))
 
-        false_seq_rate = calc_false_sequencing_rate(variants, possible_SNPs, ref)
+        false_seq_rate = calc_false_sequencing_rate(variants,processed_results, ref)
 
         for pos in sorted(all_results.keys()):
             r = all_results[pos][0]
             a = all_results[pos][1]
-            results.append(f"{genome_basename}\t{chrom}\t{pos}\t{r}\t{a}\t")
+            p = processed_results[pos]  # Final base
+            if pos in variants.keys():
+                freq = ','.join(f"{key}:{value}" for key, value in variants[pos].items())
+            else:
+                freq = "-"
+            results.append(f"{genome_basename}\t{chrom}\t{pos}\t{r}\t{a}\t{freq}\t{p}")
 
         summary.append(
             f"{genome_basename}\t{chrom}\t{start_pos}\t{end_pos}\t{seq}\t{ref}\t"
             f"{';'.join(f'{pos}:{snp}' for pos, snp in SNPs.items()) if SNPs else '-'}\t"
             f"{len(SNPs) if SNPs else 0}\t"
-            f"{';'.join(f'{pos}:{counts}' for pos, counts in variants.items()) if variants else '-'}\t"
             f"{len(variants) if variants else 0}\t"
-            f"{';'.join(f'{pos}:{snp}' for pos, snp in possible_SNPs.items()) if possible_SNPs else '-'}\t"
+            f"{';'.join(f'{pos}:{snp}' for pos, snp in haploids.items()) if haploids else '-'}\t"
             f"{false_seq_rate}\t"
         )
 
@@ -230,31 +389,9 @@ for genome in genomes:
     os.remove(f"/tmp/{genome_basename}.sam")
 
 
-if output:
-    output_dir = output
-    os.makedirs(output_dir, exist_ok=True)  # Create the directory if it doesn't exist
-    with open(f"{output_dir}/summary.tsv", "w") as o:
-        o.write("\n".join(summary))
+print_output(output)
 
-    with open(f"{output_dir}/results_tmp.tsv", "w") as o:
-        o.write("\n".join(results))
 
-    # Read the TSV file
-    df = pd.read_csv(f"{output_dir}/results_tmp.tsv", sep="\t", header=0, index_col=False)
-
-    # Transform the df
-    pivot_df = df.pivot_table(
-        values="Alternative", index=["Chromosome", "Position", "Reference"],
-        columns="Genome", aggfunc='first'
-    ).reset_index()
-
-    # Rename columns
-    pivot_df.columns = ["Chromosome", "Position", "Reference"] + [
-        f"Alternative_{col}" for col in pivot_df.columns[3:]
-    ]
-
-    pivot_df.to_csv(f"{output_dir}/results.tsv", sep="\t", index=False)
-    os.remove(f"{output_dir}/results_tmp.tsv")
 
 
 
