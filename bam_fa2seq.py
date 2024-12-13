@@ -1,5 +1,5 @@
 """
-version 06.12.2024
+version 13.12.2024
 Input: A file containing paths to genomes, A file containing paths to searched region(s), Path to reference genome
 Output: Reads within the given region with their variants in sequencing and in comparison with the reference genome
 """
@@ -154,20 +154,23 @@ def parse_genome(path):
 
 def transform_location_input(path):
     locations= []
+    locations_with_type = {}
     with open(path, 'r') as f:
         for line in f:
             if not line.startswith("#"):
                 fields = line.split()
-                chromosome = fields[3]
+                type = fields[2]
+                chromosome = fields[6]
                 if chromosome.startswith("chr"):
                     chromosome = chromosome[3:]
-                start = fields[5]
-                end = fields[6]
+                start = int(fields[3])
+                end = int(fields[4]) - 1  # End is exclusive
                 locations.append(f"{chromosome}:{start}-{end}")
+                locations_with_type[(chromosome, start, end)] = type
     with open(f"{os.path.dirname(path)}/locations_tranformed.txt", 'w') as w:
          for location in locations:
              w.write(f"{location}\n")
-    return locations
+    return locations, locations_with_type
 
 def calc_false_sequencing_rate(variants:dict,processed_results, ref:str):
     if len(variants) > 0:
@@ -192,17 +195,17 @@ def print_output(output_path):
 
     # Transform the df
     pivot_df = df.pivot_table(
-        values=["Alternative", "Variants_Freq", "Processed_Alt"], index=["Chromosome", "Position", "Reference"],
+        values=["Alternative", "Variants_Freq", "Processed_Alt"], index=["Chromosome", "Position", "Type", "Reference"],
         columns="Genome", aggfunc='first'
     ).reset_index()
 
-    pivot_df.columns = ['Chromosome', 'Position', 'Reference'] + [
-        f"{col[0]}_{col[1]}" for col in pivot_df.columns[3:]
+    pivot_df.columns = ['Chromosome', 'Position', "Type" ,'Reference'] + [
+        f"{col[0]}_{col[1]}" for col in pivot_df.columns[4:]
     ]
 
 
     # Rearrange the columns
-    columns = ['Chromosome', 'Position', 'Reference']
+    columns = ['Chromosome', 'Position', "Type" ,'Reference']
     other_columns = [col for col in pivot_df.columns if col not in columns]
     genome_names = set(a.split("_")[1] for a in other_columns)
     for name in genome_names:
@@ -322,7 +325,7 @@ ref_genome = extract_ref_genome(ref_path, location_path)
 """
 
 if os.path.isfile(location_path):  # Input is the annotation file from ISAR
-    locations = transform_location_input(location_path)
+    locations, locations_with_type = transform_location_input(location_path)
     transformed_path = f"{os.path.dirname(location_path)}/locations_tranformed.txt"
     ref_genome = extract_ref_genome(ref_path, transformed_path)
 
@@ -330,9 +333,9 @@ else:
     raise Exception("Location file not found or not correct")
 
 
-results = [f"Genome\tChromosome\tPosition\tReference\tAlternative\tVariants_Freq\tProcessed_Alt"]
+results = [f"Genome\tChromosome\tPosition\tType\tReference\tAlternative\tVariants_Freq\tProcessed_Alt"]
 
-summary = [f"Genome\tChromosome\tStart\tEnd\tProcessed_Sequence\tReference\tSNP\tSNP_Freq\tSequencing_Variance_Freq\tHaploid\tApprox_sequencing_rate"]
+summary = [f"Genome\tChromosome\tStart\tEnd\tType\tProcessed_Sequence\tReference\tSNP\tSNP_Freq\tSequencing_Variance_Freq\tHaploid\tApprox_sequencing_rate"]
 
 for genome in genomes:
 
@@ -343,22 +346,23 @@ for genome in genomes:
     # Extract all reads for the specified locations
     combined_locations = ' '.join(locations)
     temp_sam_path = f"/tmp/{genome_basename}.sam"
-    command1 = f"(cd /mnt/proj/software && samtools view {genome} {combined_locations}) > {temp_sam_path}"
+    command1 = f"(cd /mnt/proj/software && samtools view {genome} {combined_locations} | sort | uniq > {temp_sam_path})"
     subprocess.run(command1, shell=True, check=True)
 
     all_reads = extract_reads_from_sam(temp_sam_path)
 
     for location in locations:
+        chrom, pos_range = location.split(":")
+        start_pos, end_pos = map(int, pos_range.split("-"))
+
         # Extract ref genome at the current range
         ref = ref_genome.get(location)
 
         # Process reads and find variants for the current location
+        type = locations_with_type[(chrom, start_pos, end_pos)]
         variant_dict = reads_processing(all_reads, location)
 
         all_results, processed_results, seq, variants, SNPs, haploids = find_variants_per_pos(variant_dict, ref)
-
-        chrom, pos_range = location.split(":")
-        start_pos, end_pos = map(int, pos_range.split("-"))
 
         false_seq_rate = calc_false_sequencing_rate(variants,processed_results, ref)
 
@@ -370,10 +374,10 @@ for genome in genomes:
                 freq = ','.join(f"{key}:{value}" for key, value in variants[pos].items())
             else:
                 freq = "-"
-            results.append(f"{genome_basename}\t{chrom}\t{pos}\t{r}\t{a}\t{freq}\t{p}")
+            results.append(f"{genome_basename}\t{chrom}\t{pos}\t{type}\t{r}\t{a}\t{freq}\t{p}")
 
         summary.append(
-            f"{genome_basename}\t{chrom}\t{start_pos}\t{end_pos}\t{seq}\t{ref}\t"
+            f"{genome_basename}\t{chrom}\t{start_pos}\t{end_pos}\t{type}\t{seq}\t{ref}\t"
             f"{';'.join(f'{pos}:{snp}' for pos, snp in SNPs.items()) if SNPs else '-'}\t"
             f"{len(SNPs) if SNPs else 0}\t"
             f"{len(variants) if variants else 0}\t"
@@ -390,10 +394,3 @@ for genome in genomes:
 
 
 print_output(output)
-
-
-
-
-
-
-
