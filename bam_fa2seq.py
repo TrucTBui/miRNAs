@@ -1,5 +1,5 @@
 """
-version 13.12.2024
+version 10.01.2025
 Input: A file containing paths to genomes, A file containing paths to searched region(s), Path to reference genome
 Output: Reads within the given region with their variants in sequencing and in comparison with the reference genome
 """
@@ -59,7 +59,8 @@ def reads_processing(all_reads, location):
     return variant_dict
 
 def find_variants_per_pos(variant_dict: dict(), reference):
-    seq = ""
+    seq1 = ""
+    seq2 = ""
     variants = {}
     all_results = {}
     processed_results = {}
@@ -84,26 +85,39 @@ def find_variants_per_pos(variant_dict: dict(), reference):
             variants[pos] = dict(sorted_bases)
 
             most_frequent_base = ordered_bases[0]  # Extract the most significant base
+            second_frequent_base = ordered_bases[1]
             ratio = (frequency[most_frequent_base] / sum(frequency.values()))
+            ratio2 = (frequency[second_frequent_base] / sum(frequency.values()))
+            ratio12 = ((frequency[most_frequent_base] + frequency[second_frequent_base]) / sum(frequency.values()))
 
             # Process the reads results: The most frequent base is supposed to be the correct one
-            if ratio >= 0.75 or (len(unique_bases) > 2 and ratio >= 0.5):  # 3 or 4 bases detected when reading
+            if (ratio >= 0.7 or (sum(frequency.values()) < 15 and ratio >= 0.6) or (len(unique_bases) == 3 and (ratio >= 0.6 or ratio/ratio2 >=1.5 )) or
+                    (len(unique_bases) >= 4 and ratio/ratio2 >= 1.5)):
                 processed_results[pos] = most_frequent_base
-                seq += most_frequent_base
+                seq1+= most_frequent_base
+                seq2+= most_frequent_base
 
                 # compare the most frequent base read at position with the ref
                 if not most_frequent_base == ref:  # SNP found
                     SNPs[pos] = f"{ref}/{most_frequent_base}"
             else:
-                processed_results[pos] = "/".join(unique_bases)
-                seq += "(" + "/".join(ordered_bases) + ")"
+                if ratio12 > 0.65:
+                    seq1 += f"[{most_frequent_base}]"
+                    seq2 += f"[{second_frequent_base}]"
+                    processed_results[pos] = f"{most_frequent_base}/{second_frequent_base}"
+                    haploids[pos] = f"{most_frequent_base}/{second_frequent_base}"
+                else:
+                    processed_results[pos] = "/".join(ordered_bases)
+                    haploids[pos] = "/".join(ordered_bases)
+                    seq1 += f"[{most_frequent_base}]"
+                    seq2 += f"[N]"  # TODO: Think of another way
 
-                haploids[pos] = "/".join(ordered_bases)
 
 
         else:  # Only one base at that position
             base = bases[0]
-            seq += base
+            seq1 += base
+            seq2 += base
             processed_results[pos] = base
 
             if not base == ref:  # SNP found
@@ -111,7 +125,7 @@ def find_variants_per_pos(variant_dict: dict(), reference):
 
         counter += 1
 
-    return all_results, processed_results, seq, variants, SNPs, haploids
+    return all_results, processed_results, seq1, seq2, variants, SNPs, haploids
 
 def extract_ref_genome(fa, locations):
     """
@@ -143,13 +157,18 @@ def extract_ref_genome(fa, locations):
     return seqs
 
 
-def parse_genome(path):
+def parse_genome(path, alignment):
     genomes = []
     with open(path, 'r') as f:
         for line in f:
             if line.startswith("#"):
                 continue
-            genomes.append(line.strip())
+            if not alignment:
+                genomes.append(line.strip())
+            else:
+                line = line.strip()
+                genome, member = line.split()
+                genomes.append([genome, member])
     return genomes
 
 def transform_location_input(path):
@@ -167,7 +186,7 @@ def transform_location_input(path):
                 end = int(fields[4]) - 1  # End is exclusive
                 locations.append(f"{chromosome}:{start}-{end}")
                 locations_with_type[(chromosome, start, end)] = type
-    with open(f"{os.path.dirname(path)}/locations_tranformed.txt", 'w') as w:
+    with open(f"{os.path.dirname(path)}/locations_transformed.txt", 'w') as w:
          for location in locations:
              w.write(f"{location}\n")
     return locations, locations_with_type
@@ -182,8 +201,22 @@ def calc_false_sequencing_rate(variants:dict,processed_results, ref:str):
     else:
         return 0.0
 
-def print_output(output_path):
+def print_output(output_path, alignment):
     os.makedirs(output_path, exist_ok=True)  # Create the directory if it doesn't exist
+
+    if alignment:
+        with open(f"{output_path}/alignment_tmp.tsv", "w") as o:
+            o.write(f"Member\tGenome\tChromosome\tStart\tEnd\tType\tHaploid\tProcessed_Sequence\n")
+            sorted_alignment = sorted(multiple_alignment, key=lambda x: (x[4], x[2]))
+            for entry in sorted_alignment:
+                o.write("\t".join(map(str, entry)) + "\n")
+
+        alignment_df = pd.read_csv(f"{output_path}/alignment_tmp.tsv", sep="\t", header=0, index_col=False, low_memory=False)
+        alignment_df = alignment_df.drop_duplicates()
+        alignment_df.to_csv(f"{output_path}/alignment.tsv", sep="\t", header=True, index=False)
+        os.remove(f"{output_path}/alignment_tmp.tsv")
+
+
     with open(f"{output_path}/summary.tsv", "w") as o:
         o.write("\n".join(summary))
 
@@ -191,7 +224,7 @@ def print_output(output_path):
         o.write("\n".join(results))
 
     # Read the TSV file
-    df = pd.read_csv(f"{output_path}/results_tmp.tsv", sep="\t", header=0, index_col=False)
+    df = pd.read_csv(f"{output_path}/results_tmp.tsv", sep="\t", header=0, index_col=False, low_memory=False)
 
     # Transform the df
     pivot_df = df.pivot_table(
@@ -212,46 +245,50 @@ def print_output(output_path):
         columns.extend([col for col in pivot_df.columns if col.endswith(name)])
     pivot_df = pivot_df[columns]
 
-    pivot_df['Conclusion'] = 'Normal'
+    if not alignment:
+        problematic_pos = []
 
-    problematic_pos = []
-    # raw_base_cols = [col for col in columns if col.startswith("Alternative")]
-    final_base_cols = [col for col in columns if col.startswith("Processed_Alt")]
+        pivot_df['Conclusion'] = 'Normal'
 
-    for index, row in pivot_df.iterrows():
-        ref = row.Reference
-        alts = []
-        """
-        for col in raw_base_cols:
-            if row[col].count('/') == 3:  # Problematic: All 4 bases were read at the position
-                pivot_df.loc[index, 'Conclusion'] = 'Problem'
-                problematic_pos.append(f"{row.Chromosome}:{row.Position}")
-                break
-        """
-        for col in final_base_cols:
-            alt = row[col]
-            alts.append(alt)
-        if len(set(alts)) > 1 or any('/' in alt for alt in alts):  # Conflicts in read
-            if all('/' in alt for alt in alts) or all('/' not in alt for alt in alts):
-                pivot_df.loc[index, 'Conclusion'] = 'Haploid'
-            else:  # Problematic: Haploid in one genome and no-halpoid in the other one
-                pivot_df.loc[index, 'Conclusion'] = 'Problem'
-                problematic_pos.append(f"{row.Chromosome}:{row.Position}")
-        elif ref != alts[0]:  # Base is clear and different from the ref
-            pivot_df.loc[index, 'Conclusion'] = 'SNP'
+        # raw_base_cols = [col for col in columns if col.startswith("Alternative")]
+        final_base_cols = [col for col in columns if col.startswith("Processed_Alt")]
 
+        for index, row in pivot_df.iterrows():
+            ref = row.Reference
+            alts = []
+            """
+            for col in raw_base_cols:
+                if row[col].count('/') == 3:  # Problematic: All 4 bases were read at the position
+                    pivot_df.loc[index, 'Conclusion'] = 'Problem'
+                    problematic_pos.append(f"{row.Chromosome}:{row.Position}")
+                    break
+            """
+            for col in final_base_cols:
+                alt = row[col]
+                alts.append(alt)
+
+            if len(set(alts)) > 1 or any('/' in alt for alt in alts):  # Conflicts in read
+                if all('/' in alt for alt in alts) or all('/' not in alt for alt in alts):
+                    pivot_df.loc[index, 'Conclusion'] = 'Haploid'
+                else:  # Problematic: Haploid in one genome and no-halpoid in the other one
+                    pivot_df.loc[index, 'Conclusion'] = 'Problem'
+                    problematic_pos.append(f"{row.Chromosome}:{row.Position}")
+            elif ref != alts[0]:  # Base is clear and different from the ref
+                pivot_df.loc[index, 'Conclusion'] = 'SNP'
+
+        with open(f"{output_path}/problems.csv", "w") as o:
+            if len(problematic_pos) > 0:
+                grouped_regions = group_problematic_positions(problematic_pos)
+                o.write("\n".join(grouped_regions))
+            else:
+                o.write("No problematic positions detected.")
+
+    # Make less output (for better overview)
+    pivot_df = pivot_df.drop(columns=[col for col in columns if col.startswith("Alternative")])
 
     pivot_df.to_csv(f"{output_path}/results.tsv", sep="\t", index=False)
 
-    with open(f"{output_path}/problems.csv", "w") as o:
-        if len(problematic_pos) > 0:
-            grouped_regions = group_problematic_positions(problematic_pos)
-            o.write("\n".join(grouped_regions))
-        else:
-            o.write("No problematic positions detected.")
-
     os.remove(f"{output_path}/results_tmp.tsv")
-
 
 def group_problematic_positions(problematic_pos, distance_threshold=5):
     grouped_regions = []
@@ -301,15 +338,19 @@ parser.add_argument("-g", "--genome", type=str, required=True, help="file contai
 parser.add_argument("-r", "--reference", type=str, required=True, help="reference genome in fasta format")
 parser.add_argument("-l", "--location", type=str, required=True, help="genome location to extract reads")
 parser.add_argument("-o", "--output", type=str, required=False, help="output folder for the result", default="./")
+parser.add_argument("-a", "--alignment", action="store_true", required=False, help="set this flag to have alignment in family")
 
 args = parser.parse_args()
 genome_path = args.genome
 ref_path = args.reference
 output = args.output
 location_path = args.location
+alignment=False
+if args.alignment:
+    alignment = True
 
 # Parse the input path to a list of bam files (index 0) and vcf files(index1)
-genomes= parse_genome(genome_path)
+genomes= parse_genome(genome_path, alignment)
 
 """
 # The input file is already a csv file, each line containing the position
@@ -326,7 +367,7 @@ ref_genome = extract_ref_genome(ref_path, location_path)
 
 if os.path.isfile(location_path):  # Input is the annotation file from ISAR
     locations, locations_with_type = transform_location_input(location_path)
-    transformed_path = f"{os.path.dirname(location_path)}/locations_tranformed.txt"
+    transformed_path = f"{os.path.dirname(location_path)}/locations_transformed.txt"
     ref_genome = extract_ref_genome(ref_path, transformed_path)
 
 else:
@@ -337,7 +378,15 @@ results = [f"Genome\tChromosome\tPosition\tType\tReference\tAlternative\tVariant
 
 summary = [f"Genome\tChromosome\tStart\tEnd\tType\tProcessed_Sequence\tReference\tSNP\tSNP_Freq\tSequencing_Variance_Freq\tHaploid\tApprox_sequencing_rate"]
 
-for genome in genomes:
+multiple_alignment = []
+
+for geno in genomes:
+    member = None
+    if not alignment:  # geno is a list of genome file paths
+        genome = geno
+    else:  # geno is a list of [genome path, family member]
+        genome = geno[0]
+        member = geno[1]
 
     genome_basename = os.path.splitext(os.path.basename(genome))[0]
 
@@ -362,7 +411,13 @@ for genome in genomes:
         type = locations_with_type[(chrom, start_pos, end_pos)]
         variant_dict = reads_processing(all_reads, location)
 
-        all_results, processed_results, seq, variants, SNPs, haploids = find_variants_per_pos(variant_dict, ref)
+        all_results, processed_results, seq1, seq2, variants, SNPs, haploids = find_variants_per_pos(variant_dict, ref)
+        if not seq1 == seq2:
+            haploid = True
+            seq = "/".join(processed_results[pos] for pos in sorted(all_results.keys()))
+        else:
+            haploid = False
+            seq = seq1
 
         false_seq_rate = calc_false_sequencing_rate(variants,processed_results, ref)
 
@@ -385,6 +440,15 @@ for genome in genomes:
             f"{false_seq_rate}\t"
         )
 
+        if alignment:
+            multiple_alignment.append(["","Reference", chrom, start_pos, end_pos, type, "H0", ref])
+
+            if haploid:
+                multiple_alignment.append([member, genome_basename, chrom, start_pos, end_pos, type, "H1", seq1])
+                multiple_alignment.append([member, genome_basename, chrom, start_pos, end_pos, type, "H2", seq2])
+            else:
+                multiple_alignment.append([member, genome_basename, chrom, start_pos, end_pos, type, "H0", seq1])
+
     genome_end_time = time.perf_counter()
     runtime = genome_end_time - genome_start_time
     print(f"Runtime for {genome_basename}: {runtime:.5f} seconds")
@@ -393,4 +457,4 @@ for genome in genomes:
     os.remove(f"/tmp/{genome_basename}.sam")
 
 
-print_output(output)
+print_output(output, alignment)
