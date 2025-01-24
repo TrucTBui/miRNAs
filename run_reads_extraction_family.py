@@ -15,9 +15,7 @@ def run(gene_name, ID):
         subprocess.run(cmd, shell=True, check=True)
 
 gene_list = {"ENSG00000139618":"BRCA2", "ENSG00000160791":"CCR5","ENSG00000240972":"MIF"}
-#gene_list = {"ENSG00000139618":"BRCA2"}
-#gene_list ={"ENSG00000160791":"CCR5"}
-#gene_list ={"ENSG00000240972":"MIF"}
+
 
 for id, gene_name in gene_list.items():
     run(gene_name, id)

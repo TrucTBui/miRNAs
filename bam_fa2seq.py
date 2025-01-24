@@ -179,6 +179,8 @@ def transform_location_input(path):
             if not line.startswith("#"):
                 fields = line.split()
                 type = fields[2]
+                if type == "exon":  # Ignore, since UTR and CDS are already in exons
+                    continue
                 chromosome = fields[6]
                 if chromosome.startswith("chr"):
                     chromosome = chromosome[3:]
